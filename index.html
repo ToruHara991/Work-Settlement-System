@@ -1,9 +1,9 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>工作結算書系統</title>
+  <title>工作結算書系統（測試版）</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     td, th { vertical-align: middle; }
@@ -17,9 +17,193 @@
       padding: 8px 0 20px;
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-BQlNx0cV.js"></script>
+  <style>
+  #wx-dlg{position:fixed;inset:0;background:rgba(20,40,70,.35);display:none;align-items:center;justify-content:center;z-index:10000}
+  #wx-dlg .box{background:#fff;border:1px solid #6680a0;border-radius:6px;max-width:520px;width:calc(100% - 32px);padding:18px 20px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:11pt;line-height:1.7;white-space:pre-wrap}
+  #wx-dlg .btns{margin-top:14px;text-align:right}
+  #wx-dlg button{font:inherit;font-size:10.5pt;padding:5px 16px;margin-left:8px;border-radius:3px;border:1px solid #8899aa;background:#f2f5f9;cursor:pointer}
+  #wx-dlg button.ok{background:#336699;color:#fff;border-color:#336699}
+  #wx-tools{position:fixed;right:8px;bottom:8px;z-index:9999;font:9pt "微軟正黑體",sans-serif;background:#fff;border:1px solid #8899aa;border-radius:4px;padding:4px 6px;opacity:.9}
+  #wx-tools button{font-size:9pt}
+</style>
+<script>
+  /* ===== 測試版：瀏覽器內的模擬後端與相容層 ===== */
+  window.__BASE = (document.currentScript && new URL(".", document.currentScript.baseURI).href) || new URL(".", location.href).href;
+  try { sessionStorage.setItem("wx-base", window.__BASE); } catch (e) {}
+
+  // ---- 對話框（網頁檢視器會封鎖 alert / confirm，改用頁內對話框）----
+  (function () {
+    const queue = [];
+    let open = false;
+    function show(item) {
+      const d = document.getElementById("wx-dlg");
+      d.querySelector(".msg").textContent = item.msg;
+      const btns = d.querySelector(".btns");
+      btns.innerHTML = "";
+      if (item.confirm) {
+        const c = document.createElement("button");
+        c.textContent = "取消";
+        c.onclick = () => close(item.onCancel);
+        btns.appendChild(c);
+      }
+      const ok = document.createElement("button");
+      ok.className = "ok";
+      ok.textContent = "確定";
+      ok.onclick = () => close(item.onOk);
+      btns.appendChild(ok);
+      d.style.display = "flex";
+      open = true;
+      setTimeout(() => ok.focus(), 0);
+    }
+    function close(cb) {
+      document.getElementById("wx-dlg").style.display = "none";
+      open = false;
+      try { cb && cb(); } catch (e) { console.error(e); }
+      if (queue.length) show(queue.shift());
+    }
+    window.__dialog = (item) => (open ? queue.push(item) : show(item));
+
+    window.alert = (msg) => window.__dialog({ msg: String(msg ?? "") });
+
+    // confirm 必須同步回傳；做法：第一次回傳 false 並顯示對話框，按「確定」後重新點一次原按鈕，此時回傳 true
+    let lastTarget = null;
+    const approved = new Set();
+    document.addEventListener("click", (e) => { lastTarget = e.target; }, true);
+    window.confirm = (msg) => {
+      msg = String(msg ?? "");
+      if (approved.has(msg)) { approved.delete(msg); return true; }
+      const t = lastTarget;
+      window.__dialog({
+        msg, confirm: true,
+        onOk: () => {
+          if (t && t.isConnected) { approved.add(msg); t.click(); setTimeout(() => approved.delete(msg), 500); }
+        },
+      });
+      return false;
+    };
+    window.prompt = () => null;
+  })();
+
+  // ---- 下載（透過檢視器的 downloads 功能）----
+  (function () {
+    let dl = null;
+    try { if (window.claude && window.claude.use) window.claude.use("downloads").then((x) => (dl = x)).catch(() => {}); } catch (e) {}
+    window.__saveFile = async (blob, name) => {
+      if (dl) {
+        try { await dl.save({ filename: name, data: blob }); }
+        catch (e) {
+          if (e && e.code === "declined") return;
+          alert("下載未完成：" + ((e && (e.message || e.code)) || e));
+        }
+        return;
+      }
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 3000);
+    };
+  })();
+
+  // ---- axios adapter：把 /api 請求交給頁內的模擬後端 ----
+  window.__localAdapter = async (config) => {
+    const u = new URL((config.baseURL || "") + (config.url || ""), location.origin);
+    if (config.params)
+      Object.entries(config.params).forEach(([k, v]) => { if (v !== undefined && v !== null) u.searchParams.append(k, v); });
+    const method = (config.method || "get").toUpperCase();
+    const headers = {};
+    const raw = config.headers && config.headers.toJSON ? config.headers.toJSON() : config.headers || {};
+    Object.entries(raw).forEach(([k, v]) => { if (typeof v === "string") headers[k] = v; });
+    let body = config.data;
+    if (body instanceof FormData) Object.keys(headers).forEach((k) => k.toLowerCase() === "content-type" && delete headers[k]);
+    const req = new Request(u.href, { method, headers, body: method === "GET" || method === "HEAD" ? undefined : body });
+    const res = await window.LocalAPI.handle(req);
+    let data;
+    if (config.responseType === "blob") data = await res.blob();
+    else { const t = await res.text(); try { data = JSON.parse(t); } catch { data = t; } }
+    const response = { data, status: res.status, statusText: "", headers: Object.fromEntries(res.headers.entries()), config, request: {} };
+    if (res.status >= 200 && res.status < 300) return response;
+    const e = new Error("Request failed with status code " + res.status);
+    e.response = response; e.config = config; e.isAxiosError = true;
+    throw e;
+  };
+
+  // ---- 啟動 ----
+  (async function () {
+    function fail(msg) {
+      document.getElementById("root").innerHTML =
+        '<div style="max-width:640px;margin:60px auto;background:#fff;padding:24px;border:1px solid #99a;line-height:1.8">' + msg + "</div>";
+    }
+    try {
+      const X = await import(window.__BASE + "assets/xlsx-B2eTCt_Q.js");
+      window.XLSX = X.default;
+      await new Promise((ok, no) => {
+        let n = 0;
+        ["assets/export-docs.js", "assets/backend.js"].forEach((src) => {
+          const s = document.createElement("script");
+          s.src = window.__BASE + src;
+          s.onload = () => ++n === 2 && ok();
+          s.onerror = () => no(new Error("無法載入 " + src));
+          document.head.appendChild(s);
+        });
+      });
+      // 檢查瀏覽器儲存空間可用
+      await new Promise((ok, no) => { try { const r = indexedDB.open("wx-check"); r.onsuccess = ok; r.onerror = () => no(new Error("此檢視環境無法使用瀏覽器儲存空間")); } catch (e) { no(e); } });
+      await import(window.__BASE + "assets/index-BQlNx0cV.js");
+      setupTools();
+    } catch (e) {
+      fail("系統啟動失敗：" + (e && e.message ? e.message : e));
+    }
+  })();
+
+  // ---- 右下角工具、連結處理 ----
+  function setupTools() {
+    const box = document.getElementById("wx-tools");
+    box.style.display = "block";
+    document.getElementById("wx-backup").onclick = async () => {
+      const r = await window.LocalAPI.handle(new Request(location.origin + "/api/_local/backup"));
+      const d = new Date();
+      const stamp = `${d.getFullYear() - 1911}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+      window.__saveFile(await r.blob(), `工作結算書系統_備份_${stamp}.json`);
+    };
+    const file = document.getElementById("wx-file");
+    document.getElementById("wx-restore").onclick = () =>
+      window.__dialog({ msg: "還原會以備份檔「取代」目前所有契約書與結算書資料，確定要繼續？", confirm: true, onOk: () => file.click() });
+    file.onchange = async () => {
+      const f = file.files[0];
+      if (!f) return;
+      const r = await window.LocalAPI.handle(new Request(location.origin + "/api/_local/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: await f.text() }));
+      file.value = "";
+      const j = await r.json().catch(() => ({}));
+      window.__dialog({ msg: r.ok ? "還原完成，頁面將重新整理。" : "還原失敗：" + (j.error || r.status), onOk: () => r.ok && location.reload() });
+    };
+  }
+  document.addEventListener("click", async (ev) => {
+    const a = ev.target.closest && ev.target.closest("a[href]");
+    if (!a) return;
+    const href = a.getAttribute("href");
+    if (href === "/manual") {
+      ev.preventDefault();
+      history.pushState({ idx: (history.state && history.state.idx || 0) + 1 }, "", "/manual");
+      window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+      return;
+    }
+    if (!href.startsWith("/api/")) return;
+    ev.preventDefault();
+    const r = await window.LocalAPI.handle(new Request(location.origin + href));
+    if (!r.ok) { const j = await r.json().catch(() => ({})); alert(j.error || "下載失敗"); return; }
+    const cd = r.headers.get("Content-Disposition") || "";
+    let name = "download";
+    const m1 = cd.match(/filename\*=UTF-8''([^;]+)/i), m2 = cd.match(/filename="?([^";]+)"?/i);
+    if (m1) name = decodeURIComponent(m1[1]); else if (m2) name = m2[1];
+    window.__saveFile(await r.blob(), name);
+  }, true);
+</script>
 </head>
 <body>
   <div id="root"></div>
+  <div id="wx-dlg" role="dialog" aria-modal="true"><div class="box"><div class="msg"></div><div class="btns"></div></div></div>
+  <div id="wx-tools" style="display:none"><span style="color:#666">測試版</span>
+    <button id="wx-backup">資料備份</button> <button id="wx-restore">還原</button>
+    <input id="wx-file" type="file" accept=".json" style="display:none"></div>
 </body>
 </html>
