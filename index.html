@@ -30,6 +30,8 @@
   /* ===== 測試版：瀏覽器內的模擬後端與相容層 ===== */
   window.__BASE = (document.currentScript && new URL(".", document.currentScript.baseURI).href) || new URL(".", location.href).href;
   try { sessionStorage.setItem("wx-base", window.__BASE); } catch (e) {}
+  // 系統放在子資料夾（例如 /Work-Settlement-System/）時，讓網址保留這段路徑
+  window.__ROUTER_BASE = new URL(window.__BASE).pathname.replace(/\/+$/, "") || undefined;
 
   // ---- 對話框（網頁檢視器會封鎖 alert / confirm，改用頁內對話框）----
   (function () {
@@ -183,7 +185,7 @@
     const href = a.getAttribute("href");
     if (href === "/manual") {
       ev.preventDefault();
-      history.pushState({ idx: (history.state && history.state.idx || 0) + 1 }, "", "/manual");
+      history.pushState({ idx: (history.state && history.state.idx || 0) + 1 }, "", (window.__ROUTER_BASE || "") + "/manual");
       window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
       return;
     }
